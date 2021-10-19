@@ -8,6 +8,7 @@ import numpy as np
 import random as rd
 import matplotlib.pyplot as plt
 
+import re
 import os
 import json
 import torch
@@ -20,6 +21,7 @@ Array = np.ndarray
 Dataframe = pd.DataFrame
 Tensor = torch.Tensor
 
+Path = str
 Tokens = List[int]
 Tokenizer = Union[CamembertTokenizer]
 Batch = Dict[str, Union[str, Tensor]]
@@ -66,6 +68,64 @@ def count(
     return acc
 # endregion
 
+# region from_squad_like related functions
+def remove_abreviations(
+    text : str,
+) -> str:
+    """
+    Removes abbreviations from a (text).
+    """
+    text = re.sub('[A-Z]\.', lambda m: m.group(0)[0].lower(), text)
+    text = text.replace('art.', 'article')
+    text = text.replace('réf.', 'référence')
+    text = text.replace('etc.', 'etc')
+    text = text.replace('av.', 'avant')
+    text = text.replace('av.', 'avant')
+    text = text.replace('hab.', 'habitants')
+    text = text.replace('Sr.', 'Senior')
+    text = text.replace('°c', 'degrés Celsius')
+    text = text.replace('°C', 'degrés Celsius')
+    return text
+
+def extract_sentences(
+    paragraph : dict,
+    min_length : int = 3,
+) -> List[str]:
+    """
+    Extracts sentences from a (squad_like_datum) which length is superior to (min_length).
+    """
+    text_acc, already_added = '', set()
+    text = remove_abreviations(paragraph['context'])
+    if text not in already_added:
+        text_acc = text_acc + ' ' + text
+        already_added.add(text)
+    sentences = []
+    for sentence in text.split('.'):
+        sentence = sentence.strip()
+        if len(sentence) > min_length:
+            sentences.append(sentence + '.')
+    return sentences
+
+def extract_qas(
+    paragraph : dict,
+    sentences : List[str],
+    not_found : int,
+) -> Tuple[List[str], List[int]]:
+    questions, ids, not_found = [], [], 0
+    for qas in paragraph['qas']:
+        questions.append(qas['question'])
+        answer = qas['answers'][0]['text']
+        answer = remove_abreviations(answer).strip()
+        for i, sentence in enumerate(sentences):
+            if answer in sentence:
+                ids.append(i)
+                break
+        if len(questions) != len(ids):
+            not_found += 1
+            questions.pop()
+    return questions, ids, not_found
+# endregion
+
 class QaDataset:
 
     """
@@ -80,8 +140,10 @@ class QaDataset:
         """
         This is a dummy function, QaDatasets are always supposed to be initialized from a staticmethod.
         """
-        self.questions = pd.DataFrame({})
-        self.passages = pd.DataFrame({})
+        self.questions = pd.DataFrame({'text' : [], 'answer_id' : [], 'theme' : []})
+        self.passages = pd.DataFrame({'text' : [], 'id' : [], 'theme' : []})
+        self._batch_type = None
+        self.tokenized = False
 
     def __len__(
         self,
@@ -251,22 +313,37 @@ class QaDataset:
         return new_instance
 
     @staticmethod
-    def from_tanda_df(
-        dataframe : Dataframe,
-        ) -> None:
-        """
-        Creates a QaDataset from a (dataframe) formatted like tanda datasets.
-        """
-        self = QaDataset()
-        question_mask = dataframe.loc[:, 'answer_id'] != -1
-        # Questions has on each row : theme, text, answer_id
-        self.questions = dataframe.loc[question_mask, :].reset_index(drop=True).drop(columns=['id'])
-        passages_mask = dataframe.loc[:, 'answer_id'] == -1
-        # Passages has on each row : theme, text, id
-        self.passages = dataframe.loc[passages_mask, :].set_index('id', drop=False).drop(columns=['answer_id'])
-        self._batch_type = None
-        self.tokenized = False
-        return self
+    def from_squad_like(
+        squad_like : Union[Path, dict],
+        ) -> QaDataset:
+        if isinstance(squad_like, Path):
+            with open(squad_like, encoding='utf-8') as file:
+                squad_like = json.load(file)['data']
+        questions, answer_ids, sentences, question_themes, sentence_themes, not_found = [], [], [], [], [], 0
+        for datum in squad_like:
+            theme = datum['title']
+            for paragraph in datum['paragraphs']:
+                paragraph_sentences = extract_sentences(paragraph)
+                paragraph_questions, paragraph_answer_ids, paragraph_not_found = extract_qas(paragraph, paragraph_sentences, not_found)
+                questions += paragraph_questions
+                question_themes += [theme] * len(paragraph_questions)
+                answer_ids += [len(sentences) + answer_id for answer_id in paragraph_answer_ids]
+                sentences += paragraph_sentences
+                sentence_themes += [theme] * len(paragraph_sentences)
+                not_found += paragraph_not_found
+        print(f"During data loading, {not_found} questions were not found out of {len(questions)}, which is {not_found / len(questions)} of loss.")
+        return QaDataset.from_existing(
+            pd.DataFrame({
+                'text' : questions,
+                'answer_id' : answer_ids,
+                'theme' : question_themes,
+            }),
+            pd.DataFrame({
+                'text' : sentences,
+                'id' : list(range(len(sentences))),
+                'theme' : sentence_themes,
+            })
+        )
     # endregion
 
     def tokenize(
@@ -479,7 +556,6 @@ class QaDataset:
                 couples.append(question + passage)
             batch['couples'] = pad_and_tensorize(couples, return_attention_mask=True)
             batch['labels'] = torch.tensor(labels)
-            yield batch
-                    
+            yield batch               
     # endregion
 
