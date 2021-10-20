@@ -527,8 +527,10 @@ class QaDataset:
     def build_tanda(
         self,
         ) -> None:
-        self.X = [range(len(self))]
+        self.X = [i for i in range(len(self))]
         self.Y = []
+        self.masks = {theme : (self.passages.loc[:, 'theme'] == theme) for theme in set(self.passages.loc[:, 'theme'])}
+        self.masks_sum = {theme : mask.sum() for theme, mask in self.masks.items()}
 
     def batches_tanda(
         self,
@@ -540,22 +542,23 @@ class QaDataset:
             batch = {'forward_type' : 'tanda'}
             couples, labels, indexes = [], [], self.X[i_batch : i_batch + batch_size]
             for i in indexes:
-                question, answer_id, theme = self.questions.loc[i, ['tokenized', 'answer_id', 'theme']]
-                mask = self.passages.loc[:, 'theme'] == theme
-                pool_size = 2 if force_equity else mask.sum()
-                chosen = rd.randint(1, pool_size)
+                theme = self.questions.loc[i, 'theme']
+                mask = self.masks[theme]
+                nb_possible_passages = self.masks_sum[theme]
+                chosen = rd.randint(1, 2 if force_equity else nb_possible_passages)
                 # Right passage (meaning real answer) case
-                if chosen == 1:
-                    passage = self.passages.loc[answer_id, 'tokenized'] 
+                if chosen == 1 or nb_possible_passages == 1:
+                    passage = self.passages.loc[self.questions.loc[i, 'answer_id'], 'tokenized'] 
                 # Wrong passage (meaning not the answer) case
                 else:
-                    mask[answer_id] = False
-                    passage = rd.choice(self.passages[mask, 'tokenized'])
+                    mask[self.questions.loc[i, 'answer_id']] = False
+                    passage = self.passages.loc[mask, 'tokenized'].sample(n=1).iloc[0]
+                    mask[self.questions.loc[i, 'answer_id']] = True
                 labels.append(int(chosen == 1))
                 passage[0] = sep_token
-                couples.append(question + passage)
+                couples.append(self.questions.loc[i, 'tokenized'] + passage)
             batch['couples'] = pad_and_tensorize(couples, return_attention_mask=True)
-            batch['labels'] = torch.tensor(labels)
+            batch['Y'] = torch.tensor(labels)
             yield batch               
     # endregion
 

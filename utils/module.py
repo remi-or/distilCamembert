@@ -9,6 +9,7 @@ from utils.logger import Logger
 from utils.caller import Caller
 
 from tqdm.auto import tqdm
+from time import perf_counter
 import numpy as np
 import random as rd
 from subprocess import check_output
@@ -92,7 +93,10 @@ class Module(torch.nn.Module):
             _ verbose, a boolean that determines wether or not stats for each epoch are printed along the way
         Outputs: None
         """
+        t0 = perf_counter()
         nb_train_batches, nb_val_batches = self.get_length(train_ds, dataset_kwargs), self.get_length(val_ds, dataset_kwargs)
+        if verbose:
+            print(f"Iterating through both datasets once takes {perf_counter() - t0}")
         # Epoch loop
         for i_epoch in range(epochs):
             eta = np.mean(logger.times) * (epochs - i_epoch) if logger.times else '?'
@@ -116,7 +120,7 @@ class Module(torch.nn.Module):
 
     def get_length(
         self,
-        dataset : Dataset,
+        dataset : Optional[Dataset],
         dataset_kwargs : dict,
         ) -> int:
         """
@@ -124,6 +128,8 @@ class Module(torch.nn.Module):
         """
         length = 0
         dataset_kwargs['shuffle'] = False
+        if dataset is None:
+            return 0
         for _ in dataset.batches(**dataset_kwargs):
             length += 1
         return length
